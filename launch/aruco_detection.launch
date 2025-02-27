@@ -1,0 +1,8 @@
+<launch>
+    <group ns="$(env ROBOT_NAME)">
+        <!-- Node 2 -->
+        <node name="aruco_detector" pkg="alterego_aruco_detection" type="aruco_detector.py" output="screen">
+        </node>
+    </group>  
+
+</launch>
