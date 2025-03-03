@@ -13,7 +13,6 @@ from geometry_msgs.msg import Pose
 from geometry_msgs.msg import TransformStamped
 from filterpy.kalman import KalmanFilter
 from scipy.spatial.transform import Rotation as R
-
 class KalmanPoseFilter:
     def __init__(self, dt=1.0/15.0):  # 15Hz default rate
         # Create a Kalman filter for position and orientation
@@ -36,14 +35,14 @@ class KalmanPoseFilter:
         self.kf.H[5, 8] = 1  # qz
         self.kf.H[6, 9] = 1  # qw
         
-        # Measurement noise covariance (R)
-        self.kf.R = np.eye(7) * 0.01
-        self.kf.R[3:, 3:] *= 0.001  # Lower noise for quaternion components
+        # Measurement noise covariance (R) - AUMENTATO per ridurre l'influenza delle misurazioni rumorose
+        self.kf.R = np.eye(7) * 0.03  # Aumentato da 0.01 a 0.03
+        self.kf.R[3:, 3:] *= 0.005  # Aumentato da 0.001 a 0.005 per quaternioni
         
-        # Process noise covariance (Q)
-        self.kf.Q = np.eye(10) * 0.01
-        self.kf.Q[3:6, 3:6] *= 0.1  # Higher process noise for velocities
-        self.kf.Q[6:, 6:] *= 0.001  # Lower process noise for quaternion components
+        # Process noise covariance (Q) - RIDOTTO per movimenti più fluidi
+        self.kf.Q = np.eye(10) * 0.005  # Ridotto da 0.01 a 0.005
+        self.kf.Q[3:6, 3:6] *= 0.05  # Ridotto da 0.1 a 0.05 per velocità
+        self.kf.Q[6:, 6:] *= 0.0005  # Ridotto da 0.001 a 0.0005 per quaternioni
         
         # Initial state covariance (P)
         self.kf.P = np.eye(10) * 1.0
@@ -52,6 +51,11 @@ class KalmanPoseFilter:
         # Initialize state (x)
         self.kf.x = np.zeros(10)
         self.kf.x[9] = 1.0  # Initial quaternion w=1 (identity rotation)
+        
+        # Buffer delle misurazioni recenti per l'outlier rejection
+        self.position_buffer = []
+        self.quaternion_buffer = []
+        self.buffer_size = 5  # Mantieni le ultime 5 misurazioni
         
         self.initialized = False
         self.last_update_time = rospy.Time.now()
@@ -62,6 +66,38 @@ class KalmanPoseFilter:
         q_norm = np.linalg.norm(q)
         if q_norm > 0:
             self.kf.x[6:10] = q / q_norm
+    
+    def is_outlier(self, position, quaternion):
+        """Determina se una misurazione è un outlier basato sulla storia recente"""
+        if len(self.position_buffer) < 3:
+            return False
+            
+        # Calcola la media delle posizioni recenti
+        avg_pos = np.mean(self.position_buffer, axis=0)
+        # Distanza euclidea dalla posizione media
+        pos_distance = np.linalg.norm(position - avg_pos)
+        
+        # Soglia dinamica basata sulla varianza delle posizioni precedenti
+        pos_std = np.std([np.linalg.norm(p - avg_pos) for p in self.position_buffer])
+        pos_threshold = max(0.05, 3.0 * pos_std)  # almeno 5cm o 3 deviazioni standard
+        
+        # Per la rotazione, usiamo il prodotto scalare del quaternione
+        # Un prodotto scalare basso indica una grande rotazione
+        quat_similarity = abs(np.dot(quaternion, self.kf.x[6:10]))
+        quat_threshold = 0.95  # cos(18°) ≈ 0.95, quindi questa è una rotazione di circa 18 gradi
+        
+        # È un outlier se la posizione è troppo lontana o la rotazione è troppo grande
+        return pos_distance > pos_threshold or quat_similarity < quat_threshold
+    
+    def update_buffers(self, position, quaternion):
+        """Aggiorna i buffer con le nuove misurazioni"""
+        self.position_buffer.append(position)
+        self.quaternion_buffer.append(quaternion)
+        
+        # Mantieni solo gli ultimi buffer_size elementi
+        if len(self.position_buffer) > self.buffer_size:
+            self.position_buffer.pop(0)
+            self.quaternion_buffer.pop(0)
             
     def update(self, position, quaternion):
         """Update the filter with a new measurement"""
@@ -79,6 +115,7 @@ class KalmanPoseFilter:
             self.kf.x[9] = quaternion[3]  # qw
             self.initialized = True
             self.last_update_time = current_time
+            self.update_buffers(position, quaternion)
             return self.kf.x[0:3], self.kf.x[6:10]
             
         # Update dt in state transition matrix
@@ -90,17 +127,36 @@ class KalmanPoseFilter:
         # Ensure quaternion consistency (avoid sign flips)
         if np.dot(quaternion, self.kf.x[6:10]) < 0:
             quaternion = -np.array(quaternion)
-            
-        # Prediction step
-        self.kf.predict()
         
-        # Update step
-        z = np.array([position[0], position[1], position[2], 
-                     quaternion[0], quaternion[1], quaternion[2], quaternion[3]])
-        self.kf.update(z)
+        # Controlla se questa misurazione è un outlier
+        if self.is_outlier(position, quaternion):
+            rospy.logdebug("Outlier detected, using prediction only")
+            self.kf.predict()
+        else:
+            # Prediction step
+            self.kf.predict()
+            
+            # Update step
+            z = np.array([position[0], position[1], position[2], 
+                         quaternion[0], quaternion[1], quaternion[2], quaternion[3]])
+            self.kf.update(z)
+            
+            # Aggiorna i buffer con questa nuova misurazione valida
+            self.update_buffers(position, quaternion)
         
         # Normalize quaternion
         self.normalize_quaternion()
+        
+        # Applicazione di filtro passa-basso aggiuntivo (media mobile)
+        alpha = 0.8  # Fattore di smoothing (0.0-1.0), più alto = meno smoothing
+        
+        # Applica smoothing solo se abbiamo abbastanza campioni nel buffer
+        if len(self.position_buffer) > 1:
+            # Calcola la media pesata tra lo stato corrente e la media delle misurazioni recenti
+            weighted_pos = alpha * self.kf.x[0:3] + (1-alpha) * np.mean(self.position_buffer, axis=0)
+            
+            # Applica il risultato filtrato allo stato
+            self.kf.x[0:3] = weighted_pos
         
         self.last_update_time = current_time
         return self.kf.x[0:3], self.kf.x[6:10]
@@ -121,7 +177,6 @@ class KalmanPoseFilter:
             self.normalize_quaternion()
             
         return self.kf.x[0:3], self.kf.x[6:10]
-
 class ArucoDetector:
     def __init__(self):
         """Initialize the ArUco marker detector node."""
@@ -177,11 +232,26 @@ class ArucoDetector:
         self.min_marker_size = rospy.get_param('~min_marker_size', 30)  # pixels
         
         # Open camera
-        self.cap = cv2.VideoCapture(self.camera_id)
-        if not self.cap.isOpened():
-            rospy.logerr(f"Cannot open camera {self.camera_id}")
+        # Tentativi di apertura della camera
+        max_attempts = 10
+        attempt = 0
+        self.cap = None
+        
+        while attempt < max_attempts:
+            self.cap = cv2.VideoCapture(self.camera_id)
+            if self.cap.isOpened():
+                rospy.loginfo(f"Camera {self.camera_id} aperta con successo al tentativo {attempt + 1}")
+                break
+            else:
+                rospy.logwarn(f"Tentativo {attempt + 1}: impossibile aprire la camera {self.camera_id}")
+                self.cap.release()
+                rospy.sleep(1)  # Aspetta un secondo prima di riprovare
+                attempt += 1
+                
+        if not self.cap or not self.cap.isOpened():
+            rospy.logerr(f"Impossibile aprire la camera {self.camera_id} dopo {max_attempts} tentativi")
             return
-            
+        
         # Set higher resolution for better detection
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
