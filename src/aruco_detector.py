@@ -211,7 +211,7 @@ class ArucoDetector:
         
         # Configurable parameters
         self.aruco_dictionary_name = rospy.get_param('~aruco_dictionary', 'DICT_6X6_250')
-        self.display_detection = rospy.get_param('~display_detection', True)
+        self.display_detection = rospy.get_param('~display_detection', False)
         self.camera_id = rospy.get_param('~camera_id', 0)
         
         # Get dictionary type from configuration
@@ -358,7 +358,8 @@ class ArucoDetector:
                                 quaternion = np.array([quat[0], quat[1], quat[2], quat[3]])
                                 
                                 filtered_position, filtered_quaternion = self.pose_filter.update(position, quaternion)
-                                
+                                filtered_position, filtered_quaternion = self.rotate_marker_axes(filtered_position, filtered_quaternion)
+
                                 # Create MarkerInfo message with filtered values
                                 marker_info = MarkerInfo()
                                 marker_info.id = marker_id
@@ -388,7 +389,8 @@ class ArucoDetector:
                                 
                                 self.marker_info_pub.publish(marker_info)
                                 self.tf_broadcaster.sendTransform(transform)
-                                
+                                # Aggiungi questa linea per pubblicare anche il frame aggiustato
+                                self.publish_adjusted_marker_frame(marker_id, filtered_position, filtered_quaternion)
                                 # Visualization
                                 if self.display_detection:
                                     distance = np.sqrt(np.sum(filtered_position**2)) * 100  # in cm
@@ -436,7 +438,8 @@ class ArucoDetector:
                     if time_since_lost < self.marker_redetection_timeout:
                         # Get Kalman prediction without measurement update
                         filtered_position, filtered_quaternion = self.pose_filter.get_current_estimate()
-                        
+                        filtered_position, filtered_quaternion = self.rotate_marker_axes(filtered_position, filtered_quaternion)
+
                         # Create MarkerInfo message with predicted values
                         marker_info = MarkerInfo()
                         marker_info.id = self.target_marker_id
@@ -467,6 +470,8 @@ class ArucoDetector:
                         self.marker_info_pub.publish(marker_info)
                         self.tf_broadcaster.sendTransform(transform)
                         
+                        # Aggiungi questa linea per pubblicare anche il frame aggiustato
+                        self.publish_adjusted_marker_frame(marker_id, filtered_position, filtered_quaternion)
                         # Visualization
                         if self.display_detection:
                             cv2.putText(display_frame,
@@ -549,6 +554,96 @@ class ArucoDetector:
                 
         return [qx, qy, qz, qw]
     
+
+    def rotate_marker_axes(self, position, quaternion):
+        """
+        Ruota gli assi del marker in modo che:
+        - La nuova X diventi l'attuale -Z
+        - La nuova Z diventi l'attuale X
+        
+        Args:
+            position: array [x, y, z]
+            quaternion: array [qx, qy, qz, qw]
+            
+        Returns:
+            position_rotated: array [x, y, z] ruotato
+            quaternion_rotated: array [qx, qy, qz, qw] ruotato
+        """
+        # Converti il quaternione in una matrice di rotazione
+        r = R.from_quat([quaternion[0], quaternion[1], quaternion[2], quaternion[3]])
+        rot_matrix = r.as_matrix()
+        
+        # Crea una matrice di rotazione per la trasformazione richiesta
+        # Scambia l'asse X con l'asse Z e inverte l'asse Z
+        axes_rotation = np.array([
+            [0, 0, 1],   # Nuova X = vecchia Z
+            [0, 1, 0],   # Nuova Y = vecchia Y
+            [-1, 0, 0]   # Nuova Z = vecchia -X
+        ])
+        
+        # Applica la rotazione alla matrice originale
+        rot_matrix_rotated = np.dot(rot_matrix, axes_rotation)
+        
+        # Converti la nuova matrice di rotazione in un quaternione
+        r_rotated = R.from_matrix(rot_matrix_rotated)
+        quaternion_rotated = r_rotated.as_quat()  # [x, y, z, w]
+        
+        # Riorganizza per avere il formato [qx, qy, qz, qw]
+        quaternion_rotated = np.array([
+            quaternion_rotated[0],
+            quaternion_rotated[1],
+            quaternion_rotated[2],
+            quaternion_rotated[3]
+        ])
+        
+        # Ruota anche la posizione secondo la stessa logica se necessario
+        # Nel caso del marker, in genere si vuole mantenere la stessa posizione dell'origine
+        position_rotated = position.copy()
+        
+        return position_rotated, quaternion_rotated
+
+    def publish_adjusted_marker_frame(self, marker_id, position, quaternion):
+        """
+        Pubblica un frame TF aggiustato con un offset rispetto al marker.
+        
+        Args:
+            marker_id: ID del marker
+            position: posizione [x, y, z]
+            quaternion: quaternione [qx, qy, qz, qw]
+        """
+        # Offset desiderato (ad es. 30cm lungo l'asse X del marker)
+        offset = -0.3  # in metri
+        
+        # Crea un oggetto di rotazione dal quaternione
+        r = R.from_quat([quaternion[0], quaternion[1], quaternion[2], quaternion[3]])
+        
+        # Calcola il vettore di offset nel sistema di riferimento globale
+        # Questo aggiunge l'offset lungo l'asse X del marker (che punta fuori dal piano)
+        offset_vector = r.apply([offset, 0, 0])
+        
+        # Applica l'offset alla posizione
+        adjusted_position = position + offset_vector
+        
+        # Crea la trasformazione
+        transform = TransformStamped()
+        transform.header.stamp = rospy.Time.now()
+        transform.header.frame_id = self.base_frame
+        transform.child_frame_id = f"adjusted_{self.marker_frame}_{marker_id}"
+        
+        # Imposta posizione e orientamento
+        transform.transform.translation.x = adjusted_position[0]
+        transform.transform.translation.y = adjusted_position[1]
+        transform.transform.translation.z = adjusted_position[2]
+        transform.transform.rotation.x = quaternion[0]
+        transform.transform.rotation.y = quaternion[1]
+        transform.transform.rotation.z = quaternion[2]
+        transform.transform.rotation.w = quaternion[3]
+        
+        # Pubblica la trasformazione
+        self.tf_broadcaster.sendTransform(transform)
+
+
+
     def cleanup(self):
         """Release camera resources and close windows."""
         self.cap.release()
