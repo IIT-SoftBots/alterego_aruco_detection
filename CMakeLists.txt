@@ -41,6 +41,6 @@ include_directories(
 ## Mark executable scripts for installation
 catkin_install_python(PROGRAMS
   src/aruco_detector.py
-  src/aruco_generator.py
+  src/publish_marker_goal.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

@@ -612,7 +612,7 @@ class ArucoDetector:
             quaternion: quaternione [qx, qy, qz, qw]
         """
         # Offset desiderato (ad es. 30cm lungo l'asse X del marker)
-        offset = -0.3  # in metri
+        offset = -0.7  # in metri
         
         # Crea un oggetto di rotazione dal quaternione
         r = R.from_quat([quaternion[0], quaternion[1], quaternion[2], quaternion[3]])
@@ -628,7 +628,7 @@ class ArucoDetector:
         transform = TransformStamped()
         transform.header.stamp = rospy.Time.now()
         transform.header.frame_id = self.base_frame
-        transform.child_frame_id = f"adjusted_{self.marker_frame}_{marker_id}"
+        transform.child_frame_id = f"floating_{self.marker_frame}_{marker_id}"
         
         # Imposta posizione e orientamento
         transform.transform.translation.x = adjusted_position[0]
