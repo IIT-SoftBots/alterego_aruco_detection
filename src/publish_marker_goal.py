@@ -243,7 +243,7 @@ class FixedMarkerPublisher:
                         update_thread.start()
             
             # Log periodico (ogni 10 secondi)
-            if (rospy.Time.now() - last_log_time).to_sec() > 10.0:
+            if (rospy.Time.now() - last_log_time).to_sec() > 100.0:
                 if self.stable_transform:
                     fixed_pos = np.array([
                         self.stable_transform.transform.translation.x,

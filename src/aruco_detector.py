@@ -208,7 +208,7 @@ class ArucoDetector:
         
         # Configurable parameters
         self.aruco_dictionary_name = rospy.get_param('~aruco_dictionary', 'DICT_6X6_250')
-        self.display_detection = rospy.get_param('~display_detection', False)
+        self.display_detection = rospy.get_param('~display_detection', True)
         self.camera_id = rospy.get_param('~camera_id', 0)
         
         # Get dictionary type from configuration
@@ -372,6 +372,8 @@ class ArucoDetector:
                                 quaternion = np.array([quat[0], quat[1], quat[2], quat[3]])
                                 
                                 filtered_position, filtered_quaternion = self.pose_filter.update(position, quaternion)
+                                # filtered_position = position
+                                # filtered_quaternion = quaternion
                                 filtered_position, filtered_quaternion = self.rotate_marker_axes(filtered_position, filtered_quaternion)
 
                                 # Create MarkerInfo message with filtered values
