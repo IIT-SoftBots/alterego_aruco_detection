@@ -13,8 +13,10 @@ from geometry_msgs.msg import Pose
 from geometry_msgs.msg import TransformStamped
 from filterpy.kalman import KalmanFilter
 from scipy.spatial.transform import Rotation as R
+from std_msgs.msg import Bool, String
+import json
 class KalmanPoseFilter:
-    def __init__(self, dt=1.0/15.0):  # 15Hz default rate
+    def __init__(self, dt=1.0/20.0):  # Aggiornato per 30 Hz
         # Create a Kalman filter for position and orientation
         # State: [x, y, z, vx, vy, vz, qx, qy, qz, qw]
         self.kf = KalmanFilter(dim_x=10, dim_z=7)
@@ -35,18 +37,19 @@ class KalmanPoseFilter:
         self.kf.H[5, 8] = 1  # qz
         self.kf.H[6, 9] = 1  # qw
         
-        # Measurement noise covariance (R) - AUMENTATO per ridurre l'influenza delle misurazioni rumorose
-        self.kf.R = np.eye(7) * 0.03  # Aumentato da 0.01 a 0.03
-        self.kf.R[3:, 3:] *= 0.005  # Aumentato da 0.001 a 0.005 per quaternioni
+        # Aumentare SIGNIFICATIVAMENTE la covarianza del processo per più reattività
+        self.kf.Q = np.eye(10) * 0.3  # Aumentato da 0.1 a 0.3
+        self.kf.Q[3:6, 3:6] *= 0.5  # Aumentato da 0.2 a 0.5 per velocità
+        self.kf.Q[6:, 6:] *= 0.1     # Aumentato da 0.01 a 0.1 per rotazione
+
+        # Ridurre l'influenza delle misurazioni rumorose
+        self.kf.R = np.eye(7) * 0.01  # Ridotto da 0.05 a 0.01 per dare più peso alle misurazioni
+        self.kf.R[3:, 3:] *= 0.002    # Ridotto da 0.005 a 0.002 per quaternioni
         
-        # Process noise covariance (Q) - RIDOTTO per movimenti più fluidi
-        self.kf.Q = np.eye(10) * 0.005  # Ridotto da 0.01 a 0.005
-        self.kf.Q[3:6, 3:6] *= 0.05  # Ridotto da 0.1 a 0.05 per velocità
-        self.kf.Q[6:, 6:] *= 0.0005  # Ridotto da 0.001 a 0.0005 per quaternioni
-        
-        # Initial state covariance (P)
-        self.kf.P = np.eye(10) * 1.0
-        self.kf.P[6:, 6:] *= 0.1  # Lower uncertainty for quaternion components
+
+        # Aumentare l'adattabilità iniziale
+        self.kf.P = np.eye(10) * 10.0  # Più incertezza iniziale
+        self.kf.P[6:, 6:] *= 0.5
         
         # Initialize state (x)
         self.kf.x = np.zeros(10)
@@ -55,7 +58,7 @@ class KalmanPoseFilter:
         # Buffer delle misurazioni recenti per l'outlier rejection
         self.position_buffer = []
         self.quaternion_buffer = []
-        self.buffer_size = 5  # Mantieni le ultime 5 misurazioni
+        self.buffer_size = 3  # Mantieni le ultime 5 misurazioni
         
         self.initialized = False
         self.last_update_time = rospy.Time.now()
@@ -68,26 +71,19 @@ class KalmanPoseFilter:
             self.kf.x[6:10] = q / q_norm
     
     def is_outlier(self, position, quaternion):
-        """Determina se una misurazione è un outlier basato sulla storia recente"""
         if len(self.position_buffer) < 3:
             return False
-            
-        # Calcola la media delle posizioni recenti
-        avg_pos = np.mean(self.position_buffer, axis=0)
-        # Distanza euclidea dalla posizione media
-        pos_distance = np.linalg.norm(position - avg_pos)
         
-        # Soglia dinamica basata sulla varianza delle posizioni precedenti
-        pos_std = np.std([np.linalg.norm(p - avg_pos) for p in self.position_buffer])
-        pos_threshold = max(0.05, 3.0 * pos_std)  # almeno 5cm o 3 deviazioni standard
+        # Calcola varianza delle posizioni
+        pos_variance = np.var(self.position_buffer, axis=0)
         
-        # Per la rotazione, usiamo il prodotto scalare del quaternione
-        # Un prodotto scalare basso indica una grande rotazione
-        quat_similarity = abs(np.dot(quaternion, self.kf.x[6:10]))
-        quat_threshold = 0.95  # cos(18°) ≈ 0.95, quindi questa è una rotazione di circa 18 gradi
+        # Soglie dinamiche MOLTO più permissive per evitare falsi positivi
+        pos_threshold = np.max(pos_variance) * 5.0  # Aumentato da 5 a 10 volte la varianza
         
-        # È un outlier se la posizione è troppo lontana o la rotazione è troppo grande
-        return pos_distance > pos_threshold or quat_similarity < quat_threshold
+        # Verifica outlier con soglie più elastiche
+        pos_distance = np.linalg.norm(position - np.mean(self.position_buffer, axis=0))
+        
+        return pos_distance > pos_threshold
     
     def update_buffers(self, position, quaternion):
         """Aggiorna i buffer con le nuove misurazioni"""
@@ -101,6 +97,8 @@ class KalmanPoseFilter:
             
     def update(self, position, quaternion):
         """Update the filter with a new measurement"""
+
+        
         current_time = rospy.Time.now()
         dt = (current_time - self.last_update_time).to_sec()
         
@@ -148,16 +146,15 @@ class KalmanPoseFilter:
         self.normalize_quaternion()
         
         # Applicazione di filtro passa-basso aggiuntivo (media mobile)
-        alpha = 0.8  # Fattore di smoothing (0.0-1.0), più alto = meno smoothing
-        
-        # Applica smoothing solo se abbiamo abbastanza campioni nel buffer
+        self.alpha = 0.9  # Fattore di smoothing (0.0-1.0), più alto = meno smoothing # Da 0.8 a 0.5, più basso = più reattivo
+       # Applica smoothing solo se abbiamo abbastanza campioni nel buffer
         if len(self.position_buffer) > 1:
             # Calcola la media pesata tra lo stato corrente e la media delle misurazioni recenti
-            weighted_pos = alpha * self.kf.x[0:3] + (1-alpha) * np.mean(self.position_buffer, axis=0)
+            weighted_pos = self.alpha * position + (1-self.alpha) * np.mean(self.position_buffer, axis=0)
             
-            # Applica il risultato filtrato allo stato
+            # Applica il risultato filtrato allo stato - CAMBIATO per usare la misurazione diretta
             self.kf.x[0:3] = weighted_pos
-        
+                
         self.last_update_time = current_time
         return self.kf.x[0:3], self.kf.x[6:10]
         
@@ -226,6 +223,7 @@ class ArucoDetector:
         # Publishers
         self.detection_pub = rospy.Publisher(f'/{robot_name}/aruco_detected', Bool, queue_size=10)
         self.marker_info_pub = rospy.Publisher(f'/{robot_name}/aruco_marker_info', MarkerInfo, queue_size=10)
+        self.detections_pub = rospy.Publisher(f'/{robot_name}/detections', String, queue_size=10)
 
         # Parameters for marker tracking
         self.target_marker_id = rospy.get_param('~target_marker_id', 23)
@@ -267,7 +265,7 @@ class ArucoDetector:
         self.dist_coeffs = np.array([[-1.88526242e-01, 7.27145339e-02, -9.95206423e-05, 1.09062011e-03, -2.70775321e-02]])
         
         # Set marker size in meters
-        self.marker_size = rospy.get_param('~marker_size', 0.092)  # 9cm default
+        self.marker_size = rospy.get_param('~marker_size', 0.20)  # 9cm default
         
         # TF broadcaster
         self.tf_broadcaster = tf2_ros.TransformBroadcaster()
@@ -285,7 +283,7 @@ class ArucoDetector:
 
     def run(self):
         """Main detection loop running at 15Hz."""
-        rate = rospy.Rate(15)  # 15Hz
+        rate = rospy.Rate(20)  # 15Hz
         
         while not rospy.is_shutdown():
             # Capture frame
@@ -314,6 +312,10 @@ class ArucoDetector:
             
             # Check if target marker is detected
             target_detected = False
+
+            # Dizionario per le informazioni sui marker rilevati (simile a face_recognition)
+            marker_detections = {}
+
             if ids is not None and len(ids) > 0:
                 cv2.aruco.drawDetectedMarkers(display_frame, corners, ids)
                 
@@ -332,6 +334,18 @@ class ArucoDetector:
                         center_x = c[:, 0].mean()
                         frame_center_x = frame.shape[1] / 2
                         error_x = center_x - frame_center_x
+                        
+                                                # Calcola l'area del marker nell'immagine
+                        marker_area = cv2.contourArea(c.astype(np.float32))
+                        
+                        # Aggiunge le informazioni del marker al dizionario
+                        marker_detections[f"marker_{marker_id}"] = {
+                            "corners": c.tolist(),
+                            "center": center,
+                            "area": float(marker_area),
+                            "center_error": float(error_x)
+                        }
+
                         
                         # Estimate pose for the marker
                         try:
@@ -391,6 +405,21 @@ class ArucoDetector:
                                 self.tf_broadcaster.sendTransform(transform)
                                 # Aggiungi questa linea per pubblicare anche il frame aggiustato
                                 self.publish_adjusted_marker_frame(marker_id, filtered_position, filtered_quaternion)
+
+
+                                # Pubblica un formato compatibile con face_tracker:
+                                # Crea un bounding box simulato [x1, y1, x2, y2] usando il centro e l'area stimata
+                                bbox_width = int(np.sqrt(marker_area))
+                                bbox_height = bbox_width
+                                x1 = center[0] - bbox_width//2
+                                y1 = center[1] - bbox_height//2
+                                x2 = center[0] + bbox_width//2
+                                y2 = center[1] + bbox_height//2
+
+                                # Formato compatibile con face_tracker
+                                marker_detections[f"marker_{marker_id}"] = [int(x1), int(y1), int(x2), int(y2)]
+
+                                
                                 # Visualization
                                 if self.display_detection:
                                     distance = np.sqrt(np.sum(filtered_position**2)) * 100  # in cm
@@ -426,6 +455,9 @@ class ArucoDetector:
                             rospy.logwarn(f"Pose estimation failed: {str(e)}")
                             continue
             
+            # Pubblica le informazioni di rilevamento in formato JSON
+            self.detections_pub.publish(String(json.dumps(marker_detections)))
+
             # Handle case when marker is not detected
             if not target_detected:
                 if self.marker_visible:

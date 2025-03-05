@@ -3,6 +3,8 @@
         <!-- Node 1 -->
         <node name="aruco_detector" pkg="alterego_aruco_detection" type="aruco_detector.py" output="screen"/>
         <node name="gen_fixed_goal" pkg="alterego_aruco_detection" type="publish_marker_goal.py" output="screen"/>
+        
+        <node pkg="alterego_face_tracking" type="face_tracker.py" name="face_tracker" output="screen" />
 
 
     </group>  
