@@ -226,24 +226,24 @@ class FixedMarkerPublisher:
                     continue  # Passa alla prossima iterazione per pubblicare subito il transform
             
             # Se non stiamo già aggiornando, controlla se dobbiamo aggiornare
-            if not self.updating and self.stable_transform is not None:
-                pos, _, yaw = self.get_current_marker_pose()
+            # if not self.updating and self.stable_transform is not None:
+            #     pos, _, yaw = self.get_current_marker_pose()
                 
-                if pos is not None:
-                    if self.check_position_changed(pos, yaw):
-                        # Avvia un processo di aggiornamento in un thread separato
-                        # per non interrompere la pubblicazione del marker esistente
-                        rospy.loginfo(f"Position change detected, starting update process...")
-                        self.updating = True
+            #     if pos is not None:
+            #         if self.check_position_changed(pos, yaw):
+            #             # Avvia un processo di aggiornamento in un thread separato
+            #             # per non interrompere la pubblicazione del marker esistente
+            #             rospy.loginfo(f"Position change detected, starting update process...")
+            #             self.updating = True
                         
-                        # Usa un thread separato per l'aggiornamento
-                        import threading
-                        update_thread = threading.Thread(target=self.update_transform)
-                        update_thread.daemon = True  # Il thread termina quando il programma principale termina
-                        update_thread.start()
+            #             # Usa un thread separato per l'aggiornamento
+            #             import threading
+            #             update_thread = threading.Thread(target=self.update_transform)
+            #             update_thread.daemon = True  # Il thread termina quando il programma principale termina
+            #             update_thread.start()
             
             # Log periodico (ogni 10 secondi)
-            if (rospy.Time.now() - last_log_time).to_sec() > 100.0:
+            if (rospy.Time.now() - last_log_time).to_sec() > 1000.0:
                 if self.stable_transform:
                     fixed_pos = np.array([
                         self.stable_transform.transform.translation.x,

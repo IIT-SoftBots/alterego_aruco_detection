@@ -208,7 +208,7 @@ class ArucoDetector:
         
         # Configurable parameters
         self.aruco_dictionary_name = rospy.get_param('~aruco_dictionary', 'DICT_6X6_250')
-        self.display_detection = rospy.get_param('~display_detection', True)
+        self.display_detection = rospy.get_param('~display_detection', False)
         self.camera_id = rospy.get_param('~camera_id', 0)
         
         # Get dictionary type from configuration
@@ -646,7 +646,7 @@ class ArucoDetector:
             quaternion: quaternione [qx, qy, qz, qw]
         """
         # Offset desiderato (ad es. 30cm lungo l'asse X del marker)
-        offset = -0.7  # in metri
+        offset = -1.0  # in metri
         
         # Crea un oggetto di rotazione dal quaternione
         r = R.from_quat([quaternion[0], quaternion[1], quaternion[2], quaternion[3]])
