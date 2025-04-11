@@ -13,7 +13,8 @@ from geometry_msgs.msg import Pose
 from geometry_msgs.msg import TransformStamped
 from filterpy.kalman import KalmanFilter
 from scipy.spatial.transform import Rotation as R
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Float32
+
 import json
 class KalmanPoseFilter:
     def __init__(self, dt=1.0/20.0):  # Aggiornato per 30 Hz
@@ -62,6 +63,7 @@ class KalmanPoseFilter:
         
         self.initialized = False
         self.last_update_time = rospy.Time.now()
+
         
     def normalize_quaternion(self):
         """Normalize the quaternion in the state vector"""
@@ -210,7 +212,10 @@ class ArucoDetector:
         self.aruco_dictionary_name = rospy.get_param('~aruco_dictionary', 'DICT_6X6_250')
         self.display_detection = rospy.get_param('~display_detection', False)
         self.camera_id = rospy.get_param('~camera_id', 0)
+        self.floating_offset = rospy.get_param('~floating_offset', -1.25)
         
+        # Subscribe to topic for dynamically changing the floating offset
+        rospy.Subscriber(f'/{robot_name}/floating_offset', Float32, self.update_floating_offset)
         # Get dictionary type from configuration
         aruco_dict_type = self.dictionary_types.get(self.aruco_dictionary_name, cv2.aruco.DICT_6X6_250)
         # OpenCV 5.x API for ArUco
@@ -224,6 +229,7 @@ class ArucoDetector:
         self.detection_pub = rospy.Publisher(f'/{robot_name}/aruco_detected', Bool, queue_size=10)
         self.marker_info_pub = rospy.Publisher(f'/{robot_name}/aruco_marker_info', MarkerInfo, queue_size=10)
         self.detections_pub = rospy.Publisher(f'/{robot_name}/detections', String, queue_size=10)
+        self.floating_ready_pub = rospy.Publisher(f'/{robot_name}/floating_marker_ready', Bool, queue_size=10)
 
         # Parameters for marker tracking
         self.target_marker_id = rospy.get_param('~target_marker_id', 23)
@@ -251,18 +257,17 @@ class ArucoDetector:
             return
         
         # Set higher resolution for better detection
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         
         # Original camera matrix for ZED Mini (right camera, 720p)
         self.camera_matrix = np.array([
-            [343.14258235, 0.0, 336.03231532],    # fx, 0, cx
-            [0.0, 342.54874283, 189.4767514],    # 0, fy, cy
+            [690.76497363, 0.0, 631.08160981],    # fx, 0, cx
+            [0.0, 693.70863262, 375.37565261],    # 0, fy, cy
             [0.0, 0.0, 1.0]             # 0, 0, 1
         ])
         
-        # ZED Mini distortion coefficients
-        self.dist_coeffs = np.array([[-1.88526242e-01, 7.27145339e-02, -9.95206423e-05, 1.09062011e-03, -2.70775321e-02]])
+        self.dist_coeffs = np.array([[-0.1355764,  -0.08091611, 0.0051946, -0.00297882, 0.12494643]])
         
         # Set marker size in meters
         self.marker_size = rospy.get_param('~marker_size', 0.20)  # 9cm default
@@ -271,7 +276,7 @@ class ArucoDetector:
         self.tf_broadcaster = tf2_ros.TransformBroadcaster()
         
         # Frame names
-        self.base_frame = "camera_left"
+        self.base_frame = "camera_right"
         self.marker_frame = "aruco_marker"
         
         # Variables to track marker detection
@@ -280,6 +285,25 @@ class ArucoDetector:
         self.marker_redetection_timeout = rospy.Duration(1.0)  # 1 second timeout
         
         rospy.loginfo(f"ArUco detection node started with Kalman filtering. Dictionary: {self.aruco_dictionary_name}")
+
+
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        self.map_frame = "map"  # Or whatever your map frame is called
+
+        self.should_process = False
+
+    def update_floating_offset(self, msg):
+        """
+        Callback to update the floating offset based on incoming messages.
+        
+        Args:
+            msg: Float32 message containing the new offset value
+        """
+        self.floating_offset = msg.data
+        self.should_process = True
+        rospy.loginfo(f"Updated floating offset to: {self.floating_offset} meters")
+
 
     def run(self):
         """Main detection loop running at 15Hz."""
@@ -372,10 +396,11 @@ class ArucoDetector:
                                 quaternion = np.array([quat[0], quat[1], quat[2], quat[3]])
                                 
                                 filtered_position, filtered_quaternion = self.pose_filter.update(position, quaternion)
+                                filtered_quaternion = self.publish_map_aligned_marker_frame(marker_id, filtered_position)
                                 # filtered_position = position
                                 # filtered_quaternion = quaternion
                                 filtered_position, filtered_quaternion = self.rotate_marker_axes(filtered_position, filtered_quaternion)
-
+                                
                                 # Create MarkerInfo message with filtered values
                                 marker_info = MarkerInfo()
                                 marker_info.id = marker_id
@@ -461,71 +486,71 @@ class ArucoDetector:
             self.detections_pub.publish(String(json.dumps(marker_detections)))
 
             # Handle case when marker is not detected
-            if not target_detected:
-                if self.marker_visible:
-                    # Marker was visible but now lost
-                    if self.marker_lost_time is None:
-                        self.marker_lost_time = rospy.Time.now()
+            # if not target_detected:
+            #     if self.marker_visible:
+            #         # Marker was visible but now lost
+            #         if self.marker_lost_time is None:
+            #             self.marker_lost_time = rospy.Time.now()
                     
-                    # Check if we can still use Kalman prediction
-                    time_since_lost = rospy.Time.now() - self.marker_lost_time
-                    if time_since_lost < self.marker_redetection_timeout:
-                        # Get Kalman prediction without measurement update
-                        filtered_position, filtered_quaternion = self.pose_filter.get_current_estimate()
-                        filtered_position, filtered_quaternion = self.rotate_marker_axes(filtered_position, filtered_quaternion)
+            #         # Check if we can still use Kalman prediction
+            #         time_since_lost = rospy.Time.now() - self.marker_lost_time
+            #         if time_since_lost < self.marker_redetection_timeout:
+            #             # Get Kalman prediction without measurement update
+            #             filtered_position, filtered_quaternion = self.pose_filter.get_current_estimate()
+            #             filtered_position, filtered_quaternion = self.rotate_marker_axes(filtered_position, filtered_quaternion)
 
-                        # Create MarkerInfo message with predicted values
-                        marker_info = MarkerInfo()
-                        marker_info.id = self.target_marker_id
-                        marker_info.center_error = 0  # No real measurement
+            #             # Create MarkerInfo message with predicted values
+            #             marker_info = MarkerInfo()
+            #             marker_info.id = self.target_marker_id
+            #             marker_info.center_error = 0  # No real measurement
                         
-                        # Fill pose information with predicted values
-                        marker_info.pose.position.x = filtered_position[0]
-                        marker_info.pose.position.y = filtered_position[1]
-                        marker_info.pose.position.z = filtered_position[2]
-                        marker_info.pose.orientation.x = filtered_quaternion[0]
-                        marker_info.pose.orientation.y = filtered_quaternion[1]
-                        marker_info.pose.orientation.z = filtered_quaternion[2]
-                        marker_info.pose.orientation.w = filtered_quaternion[3]
+            #             # Fill pose information with predicted values
+            #             marker_info.pose.position.x = filtered_position[0]
+            #             marker_info.pose.position.y = filtered_position[1]
+            #             marker_info.pose.position.z = filtered_position[2]
+            #             marker_info.pose.orientation.x = filtered_quaternion[0]
+            #             marker_info.pose.orientation.y = filtered_quaternion[1]
+            #             marker_info.pose.orientation.z = filtered_quaternion[2]
+            #             marker_info.pose.orientation.w = filtered_quaternion[3]
                         
-                        # Update TF transformation
-                        transform = TransformStamped()
-                        transform.header.stamp = rospy.Time.now()
-                        transform.header.frame_id = self.base_frame
-                        transform.child_frame_id = f"{self.marker_frame}_{self.target_marker_id}"
-                        transform.transform.translation.x = filtered_position[0]
-                        transform.transform.translation.y = filtered_position[1]
-                        transform.transform.translation.z = filtered_position[2]
-                        transform.transform.rotation.x = filtered_quaternion[0]
-                        transform.transform.rotation.y = filtered_quaternion[1]
-                        transform.transform.rotation.z = filtered_quaternion[2]
-                        transform.transform.rotation.w = filtered_quaternion[3]
+            #             # Update TF transformation
+            #             transform = TransformStamped()
+            #             transform.header.stamp = rospy.Time.now()
+            #             transform.header.frame_id = self.base_frame
+            #             transform.child_frame_id = f"{self.marker_frame}_{self.target_marker_id}"
+            #             transform.transform.translation.x = filtered_position[0]
+            #             transform.transform.translation.y = filtered_position[1]
+            #             transform.transform.translation.z = filtered_position[2]
+            #             transform.transform.rotation.x = filtered_quaternion[0]
+            #             transform.transform.rotation.y = filtered_quaternion[1]
+            #             transform.transform.rotation.z = filtered_quaternion[2]
+            #             transform.transform.rotation.w = filtered_quaternion[3]
                         
-                        self.marker_info_pub.publish(marker_info)
-                        self.tf_broadcaster.sendTransform(transform)
+            #             self.marker_info_pub.publish(marker_info)
+            #             self.tf_broadcaster.sendTransform(transform)
                         
-                        # Aggiungi questa linea per pubblicare anche il frame aggiustato
-                        self.publish_adjusted_marker_frame(marker_id, filtered_position, filtered_quaternion)
-                        # Visualization
-                        if self.display_detection:
-                            cv2.putText(display_frame,
-                                        f"Marker lost: using KF prediction", 
-                                        (10, 30),
-                                        cv2.FONT_HERSHEY_SIMPLEX,
-                                        0.7,
-                                        (0, 120, 255),  # Orange
-                                        2)
-                    else:
-                        # Marker lost for too long
-                        self.marker_visible = False
-                        if self.display_detection:
-                            cv2.putText(display_frame,
-                                        f"Marker lost: tracking failed", 
-                                        (10, 30),
-                                        cv2.FONT_HERSHEY_SIMPLEX,
-                                        0.7,
-                                        (0, 0, 255),  # Red
-                                        2)
+            #             # Aggiungi questa linea per pubblicare anche il frame aggiustato
+            #             self.publish_adjusted_marker_frame(marker_id, filtered_position, filtered_quaternion)
+            #             # Visualization
+            #             if self.display_detection:
+            #                 cv2.putText(display_frame,
+            #                             f"Marker lost: using KF prediction", 
+            #                             (10, 30),
+            #                             cv2.FONT_HERSHEY_SIMPLEX,
+            #                             0.7,
+            #                             (0, 120, 255),  # Orange
+            #                             2)
+            #         else:
+            #             # Marker lost for too long
+            #             self.marker_visible = False
+            #             if self.display_detection:
+            #                 cv2.putText(display_frame,
+            #                             f"Marker lost: tracking failed", 
+            #                             (10, 30),
+            #                             cv2.FONT_HERSHEY_SIMPLEX,
+            #                             0.7,
+            #                             (0, 0, 255),  # Red
+            #                             2)
             
             # Publish detection result
             aruco_detected = Bool()
@@ -610,9 +635,9 @@ class ArucoDetector:
         # Crea una matrice di rotazione per la trasformazione richiesta
         # Scambia l'asse X con l'asse Z e inverte l'asse Z
         axes_rotation = np.array([
-            [0, 0, 1],   # Nuova X = vecchia Z
-            [0, 1, 0],   # Nuova Y = vecchia Y
-            [-1, 0, 0]   # Nuova Z = vecchia -X
+            [-1, 0, 0],   # Nuova X = vecchia Z
+            [0, -1, 0],   # Nuova Y = vecchia Y
+            [0, 0, 1]   # Nuova Z = vecchia -X
         ])
         
         # Applica la rotazione alla matrice originale
@@ -638,7 +663,8 @@ class ArucoDetector:
 
     def publish_adjusted_marker_frame(self, marker_id, position, quaternion):
         """
-        Pubblica un frame TF aggiustato con un offset rispetto al marker.
+        Pubblica un frame TF aggiustato con un offset rispetto al marker,
+        mantenendo solo l'angolo di yaw e allineando pitch e roll al frame map.
         
         Args:
             marker_id: ID del marker
@@ -646,7 +672,7 @@ class ArucoDetector:
             quaternion: quaternione [qx, qy, qz, qw]
         """
         # Offset desiderato (ad es. 30cm lungo l'asse X del marker)
-        offset = -1.0  # in metri
+        offset = self.floating_offset  # in metri
         
         # Crea un oggetto di rotazione dal quaternione
         r = R.from_quat([quaternion[0], quaternion[1], quaternion[2], quaternion[3]])
@@ -676,6 +702,50 @@ class ArucoDetector:
         # Pubblica la trasformazione
         self.tf_broadcaster.sendTransform(transform)
 
+        # Publish notification that the floating marker frame is ready
+        if self.should_process:
+            floating_ready = Bool()
+            floating_ready.data = True
+            self.floating_ready_pub.publish(floating_ready)
+            self.should_process = False
+        
+    def publish_map_aligned_marker_frame(self, marker_id, position):
+        """
+        Publishes a frame at the marker position but with the same orientation as the map frame.
+        """
+        try:
+            # Try to get transform from camera to map
+            trans = self.tf_buffer.lookup_transform(
+                self.base_frame, self.map_frame, rospy.Time(0), rospy.Duration(0.1))
+            
+            # Extract map orientation relative to camera
+            map_orientation = trans.transform.rotation
+            
+            # Create transform
+            transform = TransformStamped()
+            transform.header.stamp = rospy.Time.now()
+            transform.header.frame_id = self.base_frame
+            transform.child_frame_id = f"map_aligned_marker_{marker_id}"
+            
+            # Set position to marker position
+            transform.transform.translation.x = position[0]
+            transform.transform.translation.y = position[1]
+            transform.transform.translation.z = position[2]
+            
+            # Set orientation to map orientation
+            transform.transform.rotation = map_orientation
+            
+            
+            # Publish the transformation
+            self.tf_broadcaster.sendTransform(transform)
+
+            return np.array([map_orientation.x, map_orientation.y, map_orientation.z, map_orientation.w])
+
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, 
+                tf2_ros.ExtrapolationException) as e:
+            rospy.logwarn(f"Cannot align with map frame: {e}")
+            # Fall back to identity orientation if map frame is not available
+            return np.array([0.0, 0.0, 0.0, 1.0])
 
 
     def cleanup(self):

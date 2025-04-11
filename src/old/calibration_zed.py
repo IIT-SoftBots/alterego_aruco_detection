@@ -4,6 +4,22 @@ import numpy as np
 import glob
 import os
 
+
+# last update 27/03/2025
+# Camera Matrix:
+# [[679.66986451   0.         629.24840809]
+#  [  0.         680.81517637 348.313794  ]
+#  [  0.           0.           1.        ]]
+
+# Distortion Coefficients:
+# [[-0.17757689 -0.00668846 -0.00171704 -0.00039143  0.03758196]]
+
+# Parametri di calibrazione salvati in 'calibration_data.npz'
+
+# Errore di riproiezione totale: 0.19978724362704345
+
+
+
 def draw_ui(frame, images_captured, max_images, chessboard_found):
     """Disegna l'interfaccia utente sul frame"""
     # Disegna un rettangolo semi-trasparente per il testo
@@ -54,7 +70,7 @@ def calibrate_camera():
     objp = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
     objp[:,:2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1,2)
     
-    square_size = 0.02  # 2cm
+    square_size = 0.026  # 2cm
     objp = objp * square_size
     
     objpoints = []
@@ -62,7 +78,7 @@ def calibrate_camera():
     
     # Inizializza la camera
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     
     # Crea la finestra e imposta il callback del mouse
